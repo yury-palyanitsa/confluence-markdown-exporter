@@ -37,6 +37,8 @@ class ApiClientFactory:
 
     def __init__(self, connection_config: dict[str, Any]) -> None:
         self.connection_config = connection_config
+        self.session = requests.Session()
+        self.session.headers.update(self.connection_config.get("header", {}))
 
     def create_confluence(self, auth: ApiDetails) -> ConfluenceApiSdk:
         try:
@@ -45,6 +47,7 @@ class ApiClientFactory:
                 username=auth.username.get_secret_value() if auth.api_token else None,
                 password=auth.api_token.get_secret_value() if auth.api_token else None,
                 token=auth.pat.get_secret_value() if auth.pat else None,
+                session=self.session,
                 **self.connection_config,
             )
             instance.get_all_spaces(limit=1)
@@ -60,6 +63,7 @@ class ApiClientFactory:
                 username=auth.username.get_secret_value() if auth.api_token else None,
                 password=auth.api_token.get_secret_value() if auth.api_token else None,
                 token=auth.pat.get_secret_value() if auth.pat else None,
+                session=self.session,
                 **self.connection_config,
             )
             instance.get_all_projects()

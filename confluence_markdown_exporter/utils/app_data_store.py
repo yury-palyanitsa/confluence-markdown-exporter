@@ -69,6 +69,13 @@ class ConnectionConfig(BaseModel):
             "Set to False only if you are sure about the security of your connection."
         ),
     )
+    header: dict[str, str] = Field(
+        default={},
+        title="Custom headers",
+        description=(
+            "Custom headers that will be passed to API client."
+        ),
+    )
 
 
 class ApiDetails(BaseModel):
