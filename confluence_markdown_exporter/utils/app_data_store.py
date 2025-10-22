@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from pydantic import Field
 from pydantic import SecretStr
 from pydantic import ValidationError
-from pydantic import field_serializer
+from pydantic import field_serializer, field_validator
 from typer import get_app_dir
 
 
@@ -70,13 +70,21 @@ class ConnectionConfig(BaseModel):
         ),
     )
     header: dict[str, str] = Field(
-        default={},
+        default_factory=dict,
         title="Custom headers",
         description=(
             "Custom headers that will be passed to API client."
         ),
     )
 
+    @field_validator("header", mode="before")
+    def parse_header(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Header must be valid JSON: {e}")
+        return v
 
 class ApiDetails(BaseModel):
     """API authentication details."""
