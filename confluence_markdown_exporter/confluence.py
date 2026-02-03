@@ -235,19 +235,42 @@ class Attachment(Document):
             return ".drawio"
         if self.comment == "draw.io preview" and self.media_type == "image/png":
             return ".drawio.png"
+        if self.media_type == "application/gliffy+json":
+            return ".gliffy.json"
 
         return mimetypes.guess_extension(self.media_type) or ""
 
     @property
+    def is_gliffy_diagram(self) -> bool:
+        """Check if this attachment is a Gliffy diagram."""
+        return self.media_type == "application/gliffy+json" and self.comment == "GLIFFY DIAGRAM"
+
+    @property
     def filename(self) -> str:
+        # Gliffy and some other attachments don't have fileId, use sanitized title instead
+        if not self.file_id or self.file_id == "":
+            sanitized_title = sanitize_filename(self.title)
+            # If title already ends with extension, don't add it again (e.g., "diagram.png" + ".png")
+            if self.extension and sanitized_title.endswith(self.extension):
+                return sanitized_title
+            return f"{sanitized_title}{self.extension}"
         return f"{self.file_id}{self.extension}"
 
     @property
     def _template_vars(self) -> dict[str, str]:
+        # For attachments like "diagram.png" where title already contains extension,
+        # provide a clean filename without extension duplication
+        clean_title = sanitize_filename(self.title)
+        if self.extension and clean_title.endswith(self.extension):
+            title_without_ext = clean_title[:-len(self.extension)]
+        else:
+            title_without_ext = clean_title
+            
         return {
             **super()._template_vars,
             "attachment_id": str(self.id),
-            "attachment_title": sanitize_filename(self.title),
+            "attachment_title": clean_title,
+            "attachment_filename": title_without_ext,  # title without extension
             # file_id is a GUID and does not need sanitized.
             "attachment_file_id": self.file_id,
             "attachment_extension": self.extension,
@@ -446,6 +469,11 @@ class Page(Document):
                     and attachment.title.replace(" ", "%20") in self.body_export
                 ):
                     attachment.export()
+                    continue
+                # Export Gliffy diagrams (stored as attachments with application/gliffy+json mediaType)
+                if attachment.is_gliffy_diagram:
+                    attachment.export()
+                    logger.info(f"Exported Gliffy diagram: {attachment.title}")
                     continue
                 if attachment.file_id in self.body:
                     attachment.export()
@@ -901,6 +929,20 @@ class Page(Document):
             attachment = None
             if fid := el.get("data-media-id"):
                 attachment = self.page.get_attachment_by_file_id(str(fid))
+
+            # Handle Gliffy images and other attachments without data-media-id
+            if attachment is None and "gliffy-image" in el.get("class", []):
+                # Extract filename from src attribute
+                src = el.get("src", "")
+                if src:
+                    from urllib.parse import unquote
+                    # src format: /download/attachments/PAGE_ID/Filename.png?version=...
+                    decoded_src = unquote(src)
+                    filename = decoded_src.split('/')[-1].split('?')[0]
+                    # Find attachment by title
+                    attachments = self.page.get_attachments_by_title(filename)
+                    if attachments:
+                        attachment = attachments[0]
 
             if attachment is None:
                 href = el.get("href") or text
