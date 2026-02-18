@@ -16,6 +16,7 @@ from confluence_markdown_exporter.utils.config_interactive import main_config_me
 from confluence_markdown_exporter.utils.type_converter import str_to_bool
 
 DEBUG: bool = str_to_bool(os.getenv("DEBUG", "False"))
+DISABLE_INTERACTIVE: bool = str_to_bool(os.getenv("DISABLE_INTERACTIVE", "False"))
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,9 @@ def get_confluence_instance() -> ConfluenceApiSdk:
             confluence = ApiClientFactory(connection_config).create_confluence(auth.confluence)
             break
         except ConnectionError:
+            if DISABLE_INTERACTIVE:
+                logger.error("Confluence connection failed. Interactive mode disabled.")
+                raise
             questionary.print(
                 "Confluence connection failed: Redirecting to Confluence authentication config...",
                 style="fg:red bold",
@@ -110,6 +114,9 @@ def get_jira_instance() -> JiraApiSdk:
             jira = ApiClientFactory(connection_config).create_jira(auth.jira)
             break
         except ConnectionError:
+            if DISABLE_INTERACTIVE:
+                logger.error("Jira connection failed. Interactive mode disabled.")
+                raise
             # Ask if user wants to use Confluence credentials for Jira
             use_confluence = questionary.confirm(
                 "Jira connection failed. Use the same authentication as for Confluence?",
