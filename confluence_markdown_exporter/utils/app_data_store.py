@@ -284,6 +284,14 @@ class ExportConfig(BaseModel):
             "If enabled, the title will be added as a top-level heading."
         ),
     )
+    macros_export_config: dict[str, dict[str, str | None]] = Field(
+        default_factory=dict,
+        title="Macro Export Config",
+        description=(
+            "Per-macro export settings. Keys are macro names and values control export modes. "
+            "Example: {'plantuml': {'export_mode': 'source', 'format': 'fenced', 'name': 'uml'}}"
+        ),
+    )
 
 
 class ConfigModel(BaseModel):

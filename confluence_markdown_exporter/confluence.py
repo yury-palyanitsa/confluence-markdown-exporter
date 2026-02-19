@@ -3,7 +3,9 @@
 https://developer.atlassian.com/cloud/confluence/rest/v1/intro
 """
 
+import base64
 import functools
+import html
 import logging
 import mimetypes
 import os
@@ -350,6 +352,7 @@ class Page(Document):
     id: int
     body: str
     body_export: str
+    body_storage: str
     editor2: str
     labels: list["Label"]
     attachments: list["Attachment"]
@@ -439,6 +442,13 @@ class Page(Document):
             / f"{self.export_path.stem}_body_export_view.html",
             str(soup.prettify()),
         )
+        if self.body_storage:
+            save_file(
+                settings.export.output_path
+                / self.export_path.parent
+                / f"{self.export_path.stem}_body_storage.xml",
+                self.body_storage,
+            )
         save_file(
             settings.export.output_path
             / self.export_path.parent
@@ -509,6 +519,7 @@ class Page(Document):
             space=Space.from_key(data.get("_expandable", {}).get("space", "").split("/")[-1]),
             body=data.get("body", {}).get("view", {}).get("value", ""),
             body_export=data.get("body", {}).get("export_view", {}).get("value", ""),
+            body_storage=data.get("body", {}).get("storage", {}).get("value", ""),
             editor2=data.get("body", {}).get("editor2", {}).get("value", ""),
             labels=[
                 Label.from_json(label)
@@ -527,7 +538,7 @@ class Page(Document):
                     "JsonResponse",
                     confluence.get_page_by_id(
                         page_id,
-                        expand="body.view,body.export_view,body.editor2,metadata.labels,"
+                        expand="body.view,body.export_view,body.storage,body.editor2,metadata.labels,"
                         "metadata.properties,ancestors",
                     ),
                 )
@@ -541,6 +552,7 @@ class Page(Document):
                 space=Space(key="", name="", description="", homepage=0),
                 body="",
                 body_export="",
+                body_storage="",
                 editor2="",
                 labels=[],
                 attachments=[],
@@ -587,6 +599,8 @@ class Page(Document):
             super().__init__(**options)
             self.page = page
             self.page_properties = {}
+            self._plantuml_counter = 0
+            self._plantuml_source_queue = self._collect_plantuml_sources()
 
         @property
         def markdown(self) -> str:
@@ -717,11 +731,236 @@ class Page(Document):
             return f"\n<details>\n<summary>{summary_text}</summary>\n\n{content}\n\n</details>\n\n"
 
         def convert_span(self, el: BeautifulSoup, text: str, parent_tags: list[str]) -> str:
+            if self._is_plantuml_span(el):
+                return self.convert_plantuml(el, text, parent_tags)
             if el.has_attr("data-macro-name"):
                 if el["data-macro-name"] == "jira":
                     return self.convert_jira_issue(el, text, parent_tags)
 
             return text
+
+        def convert_plantuml(
+            self, el: BeautifulSoup, text: str, parent_tags: list[str]
+        ) -> str:
+            if self._get_macro_export_mode("plantuml") == "source":
+                if source := self._next_plantuml_source():
+                    return self._save_plantuml_source(source)
+                return "\n<!-- PlantUML source not found -->\n"
+
+            svg_content = self._extract_svg_from_element(el)
+            if svg_content:
+                return self._save_plantuml_svg(svg_content)
+
+            if text.strip():
+                return text
+
+            img = el.find("img")
+            if img:
+                return self.convert_img(img, text, parent_tags)
+
+            return text
+
+        def _is_plantuml_span(self, el: BeautifulSoup) -> bool:
+            if "plantuml" in str(el.get("data-macro-name", "")):
+                return True
+
+            return "plantuml" in str(el.get("class", ""))
+
+        def _extract_svg_from_element(self, el: BeautifulSoup) -> str | None:
+            svg_tag = el.find("svg")
+            if svg_tag:
+                return str(svg_tag)
+
+            img = el.find("img")
+            if img and (src := img.get("src")):
+                svg_from_img = self._decode_svg_data_uri(str(src))
+                if svg_from_img:
+                    return svg_from_img
+
+            for attr_value in el.attrs.values():
+                if not isinstance(attr_value, str):
+                    continue
+                if "<svg" in attr_value:
+                    return html.unescape(attr_value)
+                svg_from_attr = self._decode_svg_data_uri(attr_value)
+                if svg_from_attr:
+                    return svg_from_attr
+
+            return None
+
+        def _decode_svg_data_uri(self, data_uri: str) -> str | None:
+            if not data_uri.startswith("data:image/svg+xml"):
+                return None
+
+            header, _, data = data_uri.partition(",")
+            if not data:
+                return None
+
+            if ";base64" in header:
+                try:
+                    return base64.b64decode(data).decode("utf-8", errors="replace")
+                except (ValueError, UnicodeDecodeError):
+                    return None
+
+            return urllib.parse.unquote(data)
+
+        def _get_macro_export_mode(self, macro_name: str) -> str:
+            macro_configs = settings.export.macros_export_config or {}
+            macro_key = macro_name.lower()
+            macro_config = macro_configs.get(macro_key) or macro_configs.get(macro_name)
+            if not macro_config:
+                return "rendered"
+            return str(macro_config.get("export_mode", "rendered"))
+
+        def _get_macro_export_config(self, macro_name: str) -> dict | None:
+            macro_configs = settings.export.macros_export_config or {}
+            macro_key = macro_name.lower()
+            return macro_configs.get(macro_key) or macro_configs.get(macro_name)
+
+        def _render_macro_source(self, macro_name: str, source: str, path: str | None = None) -> str:
+            macro_config = self._get_macro_export_config(macro_name)
+            source_text = source.strip("\n")
+            if not macro_config:
+                return self._render_fenced_macro(macro_name, source_text, path)
+
+            format_name = str(macro_config.get("format", "fenced"))
+
+            if format_name == "inline":
+                return self._render_inline_macro(source_text, macro_config)
+
+            return self._render_fenced_macro(macro_name, source_text, path, macro_config)
+
+        def _render_fenced_macro(
+            self,
+            macro_name: str,
+            source: str,
+            path: str | None = None,
+            macro_config: dict | None = None,
+        ) -> str:
+            if macro_config:
+                name = macro_config.get("name") or macro_name
+                fence_template = macro_config.get("fence_template") or "```$1 $2\n$3\n```"
+                path_value = path if path is not None else macro_config.get("path")
+            else:
+                name = macro_name
+                fence_template = "```$1 $2\n$3\n```"
+                path_value = path
+
+            return self._apply_macro_template(
+                f'\n\n{fence_template}',
+                name or "",
+                path_value or "",
+                source,
+            )
+
+        def _render_inline_macro(
+            self,
+            source: str,
+            macro_config: dict | None,
+        ) -> str:
+            if macro_config:
+                role_prefix = macro_config.get("role_prefix") or ""
+                inline_template = macro_config.get("inline_template") or "$1`$2`"
+            else:
+                role_prefix = ""
+                inline_template = "$1`$2`"
+
+            return self._apply_macro_template(inline_template, role_prefix, source, "")
+
+        def _apply_macro_template(
+            self, template: str, first: str, second: str, third: str
+        ) -> str:
+            rendered = template.replace("$1", first).replace("$2", second).replace("$3", third)
+            lines = rendered.splitlines()
+            return "\n".join(line.rstrip() for line in lines)
+
+        def _save_plantuml_svg(self, svg_content: str) -> str:
+            self._plantuml_counter += 1
+            plantuml_id = sanitize_filename(f"plantuml_{self.page.id}_{self._plantuml_counter}")
+            export_path = self._plantuml_export_path(plantuml_id, ".svg")
+            save_file(settings.export.output_path / export_path, svg_content)
+
+            link_path = self._get_path_for_href(export_path, settings.export.attachment_href)
+            return f"\n\n![PlantUML]({link_path.replace(' ', '%20')})"
+
+        def _save_plantuml_source(self, source: str) -> str:
+            self._plantuml_counter += 1
+            plantuml_id = sanitize_filename(f"plantuml_{self.page.id}_{self._plantuml_counter}")
+            export_path = self._plantuml_export_path(plantuml_id, ".puml")
+            save_file(settings.export.output_path / export_path, source)
+            return self._render_macro_source("plantuml", source)
+
+        def _plantuml_export_path(self, plantuml_id: str, extension: str) -> Path:
+            filepath_template = Template(settings.export.attachment_path.replace("{", "${"))
+            template_vars = {
+                **self.page._template_vars,
+                "attachment_id": plantuml_id,
+                "attachment_title": plantuml_id,
+                "attachment_filename": plantuml_id,
+                "attachment_file_id": plantuml_id,
+                "attachment_extension": extension,
+            }
+            return Path(filepath_template.safe_substitute(template_vars))
+
+        def _next_plantuml_source(self) -> str | None:
+            if not self._plantuml_source_queue:
+                return None
+            return self._plantuml_source_queue.pop(0)
+
+        def _collect_plantuml_sources(self) -> list[str]:
+            sources = self._extract_plantuml_sources_from_markup(self.page.body_storage)
+            if sources:
+                return sources
+
+            return self._extract_plantuml_sources_from_markup(self.page.editor2)
+
+        def _extract_plantuml_sources_from_markup(self, markup: str) -> list[str]:
+            if not markup:
+                return []
+
+            wrapped_markup = f"<root>{markup}</root>"
+            soup = BeautifulSoup(wrapped_markup, "xml")
+            sources = self._extract_plantuml_sources_from_soup(soup)
+            if sources:
+                return sources
+
+            soup = BeautifulSoup(markup, "html.parser")
+            return self._extract_plantuml_sources_from_soup(soup)
+
+        def _extract_plantuml_sources_from_soup(self, soup: BeautifulSoup) -> list[str]:
+            sources = []
+            macros = list(soup.find_all(["ac:structured-macro", "structured-macro"]))
+            macros.extend(soup.find_all(attrs={"ac:name": "plantuml"}))
+            macros.extend(soup.find_all(attrs={"data-macro-name": "plantuml"}))
+
+            seen = set()
+            for macro in macros:
+                macro_id = id(macro)
+                if macro_id in seen:
+                    continue
+                seen.add(macro_id)
+
+                if macro.get("ac:name") != "plantuml" and macro.get("data-macro-name") != "plantuml":
+                    continue
+
+                source = self._extract_plantuml_text_from_macro(cast("Tag", macro))
+                if source:
+                    sources.append(source)
+
+            return sources
+
+        def _extract_plantuml_text_from_macro(self, macro: Tag) -> str | None:
+            plain_body = macro.find("ac:plain-text-body")
+            if plain_body and plain_body.text:
+                return plain_body.text
+
+            for param_name in ("data", "code"):
+                param = macro.find("ac:parameter", {"ac:name": param_name})
+                if param and param.text:
+                    return html.unescape(param.text)
+
+            return None
+
 
         def convert_attachments(self, el: BeautifulSoup, text: str, parent_tags: list[str]) -> str:
             file_header = el.find("th", {"class": "filename-column"})
@@ -885,6 +1124,19 @@ class Page(Document):
                 attachment = self.page.get_attachment_by_file_id(str(fid))
             if not attachment and (aid := el.get("data-linked-resource-id")):
                 attachment = self.page.get_attachment_by_id(str(aid))
+
+            # Handle Gliffy images and other attachments without data-media-id
+            if attachment is None and "gliffy-image" in el.get("class", []):
+                # Extract filename from src attribute
+                src = el.get("src", "")
+                if src:
+                    # src format: /download/attachments/PAGE_ID/Filename.png?version=...
+                    decoded_src = urllib.parse.unquote(src)
+                    filename = decoded_src.split("/")[-1].split("?")[0]
+                    # Find attachment by title
+                    attachments = self.page.get_attachments_by_title(filename)
+                    if attachments:
+                        attachment = attachments[0]
 
             if attachment is None:
                 href = el.get("href") or text
