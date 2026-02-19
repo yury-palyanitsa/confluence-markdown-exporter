@@ -15,16 +15,46 @@ from typer import get_app_dir
 
 
 def get_app_config_path() -> Path:
-    """Determine the path to the app config file, creating parent directories if needed."""
+    """Determine the path to the user app config file, creating parent directories if needed."""
+    app_name = "confluence-markdown-exporter"
+    config_dir = Path(get_app_dir(app_name))
+    path = config_dir / "app_data.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_local_config_path() -> Path | None:
+    """Return the nearest local config file path searching from CWD upward."""
+    config_name = ".confluence-markdown-exporter.json"
+    current = Path.cwd()
+    direct = current / config_name
+    if direct.exists():
+        return direct
+
+    package_candidate = current / "confluence_markdown_exporter" / config_name
+    if package_candidate.exists():
+        return package_candidate
+
+    for parent in current.parents:
+        candidate = parent / config_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def get_active_config_path() -> Path:
+    """Pick the active config path based on environment and local override."""
     config_env = os.environ.get("CME_CONFIG_PATH")
     if config_env:
         path = Path(config_env)
-    else:
-        app_name = "confluence-markdown-exporter"
-        config_dir = Path(get_app_dir(app_name))
-        path = config_dir / "app_data.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    local_path = get_local_config_path()
+    if local_path:
+        return local_path
+
+    return get_app_config_path()
 
 
 APP_CONFIG_PATH = get_app_config_path()
@@ -268,28 +298,58 @@ class ConfigModel(BaseModel):
 
 def load_app_data() -> dict[str, dict]:
     """Load application data from the config file, returning a validated dict."""
-    data = json.loads(APP_CONFIG_PATH.read_text()) if APP_CONFIG_PATH.exists() else {}
+    config_env = os.environ.get("CME_CONFIG_PATH")
+    if config_env:
+        env_path = Path(config_env)
+        data = json.loads(env_path.read_text()) if env_path.exists() else {}
+        try:
+            return ConfigModel(**data).model_dump()
+        except ValidationError:
+            return ConfigModel().model_dump()
+
+    base_data = (
+        json.loads(APP_CONFIG_PATH.read_text()) if APP_CONFIG_PATH.exists() else {}
+    )
+    local_path = get_local_config_path()
+    if local_path:
+        local_data = json.loads(local_path.read_text()) if local_path.exists() else {}
+        data = _deep_merge_dicts(base_data, local_data)
+    else:
+        data = base_data
     try:
         return ConfigModel(**data).model_dump()
     except ValidationError:
         return ConfigModel().model_dump()
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """Recursively merge two dictionaries with override taking precedence."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def save_app_data(config_model: ConfigModel) -> None:
     """Save application data to the config file using Pydantic serialization."""
     # Use Pydantic's model_dump_json which properly handles SecretStr serialization
     json_str = config_model.model_dump_json(indent=2)
-    APP_CONFIG_PATH.write_text(json_str)
+    config_path = get_active_config_path()
+    config_path.write_text(json_str)
 
 
 def get_settings() -> ConfigModel:
     """Get the current application settings as a ConfigModel instance."""
     data = load_app_data()
-    return ConfigModel(
+    settings = ConfigModel(
         export=ExportConfig(**data.get("export", {})),
         connection_config=ConnectionConfig(**data.get("connection_config", {})),
         auth=AuthConfig(**data.get("auth", {})),
     )
+    return settings
 
 
 def _set_by_path(obj: dict, path: str, value: object) -> None:
