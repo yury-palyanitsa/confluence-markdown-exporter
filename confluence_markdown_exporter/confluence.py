@@ -134,6 +134,10 @@ class Organization(BaseModel):
     def pages(self) -> list[int]:
         return [page for space in self.spaces for page in space.pages]
 
+    @property
+    def pages_summary(self) -> list["PageSummary"]:
+        return [summary for space in self.spaces for summary in space.pages_summary]
+
     def export(self) -> None:
         export_pages(self.pages)
 
@@ -167,6 +171,14 @@ class Space(BaseModel):
         homepage = Page.from_id(self.homepage)
         return [self.homepage, *homepage.descendants]
 
+    @property
+    def pages_summary(self) -> list["PageSummary"]:
+        homepage = Page.from_id(self.homepage)
+        return [
+            PageSummary(id=self.homepage, title=homepage.title, space_key=self.key),
+            *homepage.descendants_summary,
+        ]
+
     def export(self) -> None:
         export_pages(self.pages)
 
@@ -199,6 +211,12 @@ class Label(BaseModel):
             name=data.get("name", ""),
             prefix=data.get("prefix", ""),
         )
+
+
+class PageSummary(BaseModel):
+    id: int
+    title: str
+    space_key: str = ""
 
 
 class Document(BaseModel):
@@ -273,8 +291,8 @@ class Attachment(Document):
             "attachment_id": str(self.id),
             "attachment_title": clean_title,
             "attachment_filename": title_without_ext,  # title without extension
-            # file_id is a GUID and does not need sanitized.
-            "attachment_file_id": self.file_id,
+            # Fall back to sanitized title when file_id is absent (e.g. Confluence Server).
+            "attachment_file_id": self.file_id if self.file_id else title_without_ext,
             "attachment_extension": self.extension,
         }
 
@@ -426,6 +444,49 @@ class Page(Document):
 
     def export_with_descendants(self) -> None:
         export_pages([self.id, *self.descendants])
+
+    @property
+    def descendants_summary(self) -> list["PageSummary"]:
+        """Return id and title for all descendant pages without fetching body content."""
+        url = "rest/api/content/search"
+        params = {
+            "cql": f"type=page AND ancestor={self.id}",
+            "limit": 100,
+            "expand": "space",
+        }
+        results = []
+
+        try:
+            response = confluence.get(url, params=params)
+            results.extend(response.get("results", []))
+            next_path = response.get("_links").get("next")
+
+            while next_path:
+                response = confluence.get(next_path)
+                results.extend(response.get("results", []))
+                next_path = response.get("_links").get("next")
+
+        except HTTPError as e:
+            if e.response.status_code == 404:  # noqa: PLR2004
+                logger.warning(
+                    f"Content with ID {self.id} not found (404) when fetching descendants."
+                )
+                return []
+            return []
+        except Exception:
+            logger.exception(
+                f"Unexpected error when fetching descendants for content ID {self.id}."
+            )
+            return []
+
+        return [
+            PageSummary(
+                id=int(result["id"]),
+                title=result.get("title", ""),
+                space_key=result.get("space", {}).get("key", ""),
+            )
+            for result in results
+        ]
 
     def export_body(self) -> None:
         soup = BeautifulSoup(self.html, "html.parser")
@@ -1179,24 +1240,32 @@ class Page(Document):
 
         def convert_img(self, el: BeautifulSoup, text: str, parent_tags: list[str]) -> str:
             attachment = None
-            if fid := el.get("data-media-id"):
-                attachment = self.page.get_attachment_by_file_id(str(fid))
 
-            # Handle Gliffy images and other attachments without data-media-id
-            if attachment is None and "gliffy-image" in el.get("class", []):
-                # Extract filename from src attribute
-                src = el.get("src", "")
-                if src:
-                    from urllib.parse import unquote
-                    # src format: /download/attachments/PAGE_ID/Filename.png?version=...
-                    decoded_src = unquote(src)
-                    filename = decoded_src.split('/')[-1].split('?')[0]
-                    # Find attachment by title
+            if fid := el.get("data-linked-resource-file-id"):
+                attachment = self.page.get_attachment_by_file_id(str(fid))
+            if attachment is None and (fid := el.get("data-media-id")):
+                attachment = self.page.get_attachment_by_file_id(str(fid))
+            if attachment is None and (aid := el.get("data-linked-resource-id")):
+                attachment = self.page.get_attachment_by_id(str(aid))
+
+            # Fall back to src URL filename for all unresolved images (including Gliffy)
+            if attachment is None and (src := el.get("src", "")):
+                decoded_src = urllib.parse.unquote(str(src))
+                filename = decoded_src.split("/")[-1].split("?")[0]
+                if filename:
                     attachments = self.page.get_attachments_by_title(filename)
                     if attachments:
                         attachment = attachments[0]
 
             if attachment is None:
+                if DEBUG:
+                    logger.debug(
+                        f"[convert_img] Could not resolve attachment for img element on page "
+                        f"{self.page.id} ({self.page.title}).\n"
+                        f"  Attributes: {dict(el.attrs)}\n"
+                        f"  Available attachments: "
+                        f"{[(a.id, a.file_id, a.title) for a in self.page.attachments]}"
+                    )
                 href = el.get("href") or text
                 return f"[{text}]({href})"
 
@@ -1281,3 +1350,22 @@ def export_pages(page_ids: list[int]) -> None:
     for page_id in (pbar := tqdm(page_ids, smoothing=0.05)):
         pbar.set_postfix_str(f"Exporting page {page_id}")
         export_page(page_id)
+
+
+def dry_run_list_pages(summaries: list[PageSummary]) -> None:
+    """Print the list of pages that would be exported in a dry run.
+
+    Args:
+        summaries: List of page summaries to display.
+    """
+    import json
+
+    output = {
+        "dry_run": True,
+        "total": len(summaries),
+        "pages": [
+            {"id": summary.id, "title": summary.title, "space_key": summary.space_key}
+            for summary in summaries
+        ],
+    }
+    print(json.dumps(output, indent=2, ensure_ascii=False))

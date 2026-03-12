@@ -99,6 +99,30 @@ Export all Confluence pages across all spaces:
 confluence-markdown-exporter all-spaces --output-path <output path e.g. ./output_path/>
 ```
 
+#### 2.5. Dry Run Mode
+
+All export commands support a `--dry-run` flag. When provided, the exporter fetches and lists the pages that would be exported without writing any files to disk.
+
+```sh
+confluence-markdown-exporter pages-with-descendants <page-id> --dry-run
+confluence-markdown-exporter spaces <space-key> --dry-run
+confluence-markdown-exporter all-spaces --dry-run
+```
+
+Example output:
+
+```json
+{
+  "dry_run": true,
+  "total": 3,
+  "pages": [
+    { "id": 645208921, "title": "My Confluence Page", "space_key": "MYSPACE" },
+    { "id": 645208922, "title": "Child Page", "space_key": "MYSPACE" },
+    { "id": 645208923, "title": "Another Child Page", "space_key": "MYSPACE" }
+  ]
+}
+```
+
 ### 3. Output
 
 The exported Markdown file(s) will be saved in the specified `output` directory e.g.:
@@ -209,8 +233,8 @@ It generally was tested on:
 
 ## Known Issues
 
-1. **Missing Attachment File ID on Server**: For some Confluence Server version/configuration the attachment file ID might not be provided (https://github.com/Spenhouet/confluence-markdown-exporter/issues/39). In the default configuration, this is used for the export path. Solution: Adjust the attachment path in the export config and use the `{attachment_id}` or `{attachment_title}` instead.
-2. **Connection Issues when behind Proxy or VPN**: There might be connection issues if your Confluence Server is behind a proxy or VPN (https://github.com/Spenhouet/confluence-markdown-exporter/issues/38). If you experience issues, help to fix this is appreciated.
+1. **Missing Attachment File ID on Server**: For some Confluence Server version/configuration the attachment file ID might not be provided (<https://github.com/Spenhouet/confluence-markdown-exporter/issues/39>). In the default configuration, this is used for the export path. Solution: Adjust the attachment path in the export config and use the `{attachment_id}` or `{attachment_title}` instead.
+2. **Connection Issues when behind Proxy or VPN**: There might be connection issues if your Confluence Server is behind a proxy or VPN (<https://github.com/Spenhouet/confluence-markdown-exporter/issues/38>). If you experience issues, help to fix this is appreciated.
 
 ## Contributing
 

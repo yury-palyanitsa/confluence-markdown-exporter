@@ -31,8 +31,22 @@ def pages(
             help="Directory to write exported Markdown files to. Overrides config if set."
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List pages that would be exported without exporting them."),
+    ] = False,
 ) -> None:
     from confluence_markdown_exporter.confluence import Page
+    from confluence_markdown_exporter.confluence import PageSummary
+    from confluence_markdown_exporter.confluence import dry_run_list_pages
+
+    if dry_run:
+        summaries = []
+        for page in pages:
+            _page = Page.from_id(int(page)) if page.isdigit() else Page.from_url(page)
+            summaries.append(PageSummary(id=_page.id, title=_page.title, space_key=_page.space.key))
+        dry_run_list_pages(summaries)
+        return
 
     with measure(f"Export pages {', '.join(pages)}"):
         for page in pages:
@@ -50,8 +64,23 @@ def pages_with_descendants(
             help="Directory to write exported Markdown files to. Overrides config if set."
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List pages that would be exported without exporting them."),
+    ] = False,
 ) -> None:
     from confluence_markdown_exporter.confluence import Page
+    from confluence_markdown_exporter.confluence import PageSummary
+    from confluence_markdown_exporter.confluence import dry_run_list_pages
+
+    if dry_run:
+        summaries = []
+        for page in pages:
+            _page = Page.from_id(int(page)) if page.isdigit() else Page.from_url(page)
+            summaries.append(PageSummary(id=_page.id, title=_page.title, space_key=_page.space.key))
+            summaries.extend(_page.descendants_summary)
+        dry_run_list_pages(summaries)
+        return
 
     with measure(f"Export pages {', '.join(pages)} with descendants"):
         for page in pages:
@@ -69,8 +98,21 @@ def spaces(
             help="Directory to write exported Markdown files to. Overrides config if set."
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List pages that would be exported without exporting them."),
+    ] = False,
 ) -> None:
     from confluence_markdown_exporter.confluence import Space
+    from confluence_markdown_exporter.confluence import dry_run_list_pages
+
+    if dry_run:
+        summaries = []
+        for space_key in space_keys:
+            space = Space.from_key(space_key)
+            summaries.extend(space.pages_summary)
+        dry_run_list_pages(summaries)
+        return
 
     with measure(f"Export spaces {', '.join(space_keys)}"):
         for space_key in space_keys:
@@ -87,8 +129,18 @@ def all_spaces(
             help="Directory to write exported Markdown files to. Overrides config if set."
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="List pages that would be exported without exporting them."),
+    ] = False,
 ) -> None:
     from confluence_markdown_exporter.confluence import Organization
+    from confluence_markdown_exporter.confluence import dry_run_list_pages
+
+    if dry_run:
+        org = Organization.from_api()
+        dry_run_list_pages(org.pages_summary)
+        return
 
     with measure("Export all spaces"):
         override_output_path_config(output_path)
